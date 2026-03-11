@@ -12,22 +12,27 @@ const paymentRoutes = require('./routes/payments');
 
 const app = express();
 
+// Trust Railway's proxy (fixes rate limiter X-Forwarded-For warning)
+app.set('trust proxy', 1);
+
 // ── Security & Logging ───────────────────────────────────
 app.use(helmet());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ── CORS ─────────────────────────────────────────────────
-const allowedOrigins = [
-  process.env.FRONTEND_URL,
-  'http://localhost:3000',
-  'http://localhost:5500',
-].filter(Boolean);
-
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, etc.)
+    // Allow requests with no origin (local files, mobile apps, Postman)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    // Allow any vercel.app subdomain + configured frontend URL
+    if (
+      !origin ||
+      origin.endsWith('.vercel.app') ||
+      origin === process.env.FRONTEND_URL ||
+      origin.startsWith('http://localhost')
+    ) {
+      return callback(null, true);
+    }
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,

@@ -4,12 +4,14 @@ const multerS3 = require('multer-s3');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 
-// Configure AWS
-const s3 = new AWS.S3({
+// Configure AWS SDK v2
+AWS.config.update({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   region: process.env.AWS_REGION,
 });
+
+const s3 = new AWS.S3();
 
 // Allowed MIME types
 const ALLOWED_TYPES = {
@@ -32,12 +34,11 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Upload to S3 under private/creatorId/uuid.ext
+// Upload to S3 using multer-s3 v2 (compatible with aws-sdk v2)
 const upload = multer({
   storage: multerS3({
     s3,
     bucket: process.env.AWS_S3_BUCKET,
-    // ACLs disabled on bucket — files are private by default
     contentType: multerS3.AUTO_CONTENT_TYPE,
     metadata: (req, file, cb) => {
       cb(null, { uploadedBy: req.user._id.toString() });
@@ -50,11 +51,11 @@ const upload = multer({
   }),
   fileFilter,
   limits: {
-    fileSize: 4 * 1024 * 1024 * 1024, // 4GB max
+    fileSize: 500 * 1024 * 1024, // 500MB max
   },
 });
 
-// Generate a temporary signed URL for private S3 files (expires in 1 hour)
+// Generate a temporary signed URL for private S3 files
 const getSignedUrl = (s3Key, expiresSeconds = 3600) => {
   return s3.getSignedUrlPromise('getObject', {
     Bucket: process.env.AWS_S3_BUCKET,
