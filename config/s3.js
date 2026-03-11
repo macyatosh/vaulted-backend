@@ -37,8 +37,7 @@ const upload = multer({
   storage: multerS3({
     s3,
     bucket: process.env.AWS_S3_BUCKET,
-    // Files are private by default — signed URLs used to serve them
-    acl: 'private',
+    // ACLs disabled on bucket — files are private by default
     contentType: multerS3.AUTO_CONTENT_TYPE,
     metadata: (req, file, cb) => {
       cb(null, { uploadedBy: req.user._id.toString() });

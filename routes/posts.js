@@ -82,6 +82,30 @@ router.get('/my', protect, creatorOnly, async (req, res) => {
   }
 });
 
+
+// ── GET /api/posts/all ───────────────────────────────────
+// Public gallery — all live posts from all creators
+router.get('/all', async (req, res) => {
+  try {
+    const posts = await Post.find({ status: 'live' })
+      .sort({ createdAt: -1 })
+      .populate('creator', 'displayName slug avatarUrl subscriptionMonthlyPrice')
+      .select('-s3Key -s3PreviewKey -s3Bucket')
+      .lean();
+
+    const postsWithMeta = posts.map(post => ({
+      ...post,
+      isLocked: post.accessType !== 'free',
+      creatorSlug: post.creator?.slug,
+      creatorName: post.creator?.displayName,
+    }));
+
+    res.json({ posts: postsWithMeta });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load gallery.' });
+  }
+});
+
 // ── GET /api/posts/creator/:slug ─────────────────────────
 // Public gallery for a creator (fan view)
 router.get('/creator/:slug', async (req, res) => {

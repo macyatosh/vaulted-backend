@@ -119,4 +119,40 @@ router.post('/change-password', protect, async (req, res) => {
   }
 });
 
+
+// ── POST /api/auth/creator-setup ────────────────────────
+// Secret one-time route to create the creator account
+// Protected by a setup secret key
+router.post('/creator-setup', async (req, res) => {
+  try {
+    const { email, password, displayName, setupKey } = req.body;
+
+    // Must provide the secret setup key from env
+    if (setupKey !== process.env.CREATOR_SETUP_KEY) {
+      return res.status(403).json({ error: 'Invalid setup key.' });
+    }
+
+    const existing = await User.findOne({ role: 'creator' });
+    if (existing) {
+      return res.status(409).json({ error: 'Creator account already exists.' });
+    }
+
+    const user = await User.create({
+      email,
+      password,
+      displayName: displayName || 'Tanya',
+      role: 'creator',
+    });
+
+    user.slug = 'tanya';
+    await user.save();
+
+    const token = signToken(user._id);
+    res.status(201).json({ token, user: user.toSafeObject(), message: 'Creator account created!' });
+  } catch (err) {
+    console.error('Creator setup error:', err);
+    res.status(500).json({ error: 'Setup failed.' });
+  }
+});
+
 module.exports = router;

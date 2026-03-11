@@ -25,10 +25,7 @@ const userSchema = new mongoose.Schema({
   // Creator settings
   subscriptionMonthlyPrice: { type: Number, default: 9.99 },
   subscriptionAnnualPrice: { type: Number, default: 79.99 },
-  stripeAccountId: { type: String }, // for Stripe Connect (payouts)
-
   // Fan subscription state
-  stripeCustomerId: { type: String },
   activeSubscription: {
     subscriptionId: String,
     creatorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
