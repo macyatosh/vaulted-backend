@@ -120,4 +120,44 @@ router.post('/change-password', protect, async (req, res) => {
 });
 
 
+
+// ── POST /api/auth/creator-setup ─────────────────────────
+// One-time secret route to create a creator account
+router.post('/creator-setup', async (req, res) => {
+  try {
+    const { email, password, displayName, setupKey } = req.body;
+
+    if (setupKey !== process.env.CREATOR_SETUP_KEY) {
+      return res.status(403).json({ error: 'Invalid setup key.' });
+    }
+
+    const existing = await User.findOne({ role: 'creator' });
+    if (existing) {
+      return res.status(409).json({ error: 'A creator account already exists. Use the login page.' });
+    }
+
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required.' });
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+
+    const emailTaken = await User.findOne({ email });
+    if (emailTaken) return res.status(409).json({ error: 'Email already in use.' });
+
+    const user = await User.create({
+      email,
+      password,
+      displayName: displayName || 'Creator',
+      role: 'creator',
+    });
+
+    user.slug = user.displayName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') + '-' + user._id.toString().slice(-4);
+    await user.save();
+
+    const token = signToken(user._id);
+    res.status(201).json({ token, user: user.toSafeObject() });
+  } catch (err) {
+    console.error('Creator setup error:', err);
+    res.status(500).json({ error: 'Setup failed. Please try again.' });
+  }
+});
+
 module.exports = router;

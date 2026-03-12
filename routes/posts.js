@@ -87,21 +87,50 @@ router.get('/my', protect, creatorOnly, async (req, res) => {
 // Public gallery — all live posts from all creators
 router.get('/all', async (req, res) => {
   try {
+    // Optionally identify logged-in user to check their access
+    let fan = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const User = require('../models/User');
+        const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET);
+        fan = await User.findById(decoded.id);
+      } catch (e) { /* not logged in — fine */ }
+    }
+
     const posts = await Post.find({ status: 'live' })
       .sort({ createdAt: -1 })
-      .populate('creator', 'displayName slug avatarUrl subscriptionMonthlyPrice')
+      .populate('creator', 'displayName slug avatarUrl subscriptionMonthlyPrice subscriptionAnnualPrice')
       .select('-s3Key -s3PreviewKey -s3Bucket')
       .lean();
 
-    const postsWithMeta = posts.map(post => ({
-      ...post,
-      isLocked: post.accessType !== 'free',
-      creatorSlug: post.creator?.slug,
-      creatorName: post.creator?.displayName,
+    const postsWithMeta = await Promise.all(posts.map(async post => {
+      let hasAccess = post.accessType === 'free';
+      if (!hasAccess && fan) {
+        if (post.accessType === 'subscription') {
+          hasAccess = (
+            fan.activeSubscription?.creatorId?.toString() === post.creator?._id?.toString() &&
+            fan.activeSubscription?.status === 'active' &&
+            fan.activeSubscription?.currentPeriodEnd > new Date()
+          );
+        } else if (post.accessType === 'ppv') {
+          hasAccess = fan.unlockedPosts?.some(id => id.toString() === post._id.toString());
+        }
+      }
+      return {
+        ...post,
+        isLocked: !hasAccess,
+        creatorSlug: post.creator?.slug,
+        creatorName: post.creator?.displayName,
+        subscriptionMonthlyPrice: post.creator?.subscriptionMonthlyPrice,
+        subscriptionAnnualPrice: post.creator?.subscriptionAnnualPrice,
+      };
     }));
 
     res.json({ posts: postsWithMeta });
   } catch (err) {
+    console.error('Gallery error:', err);
     res.status(500).json({ error: 'Failed to load gallery.' });
   }
 });
