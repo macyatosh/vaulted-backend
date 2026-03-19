@@ -14,6 +14,139 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
+
+// ── POST /api/payments/paymentlink/create ────────────────
+// Create a Razorpay Payment Link (works during account review)
+router.post('/paymentlink/create', protect, async (req, res) => {
+  try {
+    const { postId, creatorSlug, type } = req.body;
+    const fan = req.user;
+
+    let amount = 0;
+    let description = '';
+    let creatorId = null;
+    let post = null;
+
+    if (type === 'ppv' && postId) {
+      post = await Post.findById(postId).populate('creator', 'displayName slug _id');
+      if (!post || post.status !== 'live') return res.status(404).json({ error: 'Post not found.' });
+      if (post.accessType !== 'ppv') return res.status(400).json({ error: 'Not a PPV post.' });
+      if (fan.unlockedPosts?.some(id => id.toString() === postId)) return res.status(400).json({ error: 'Already unlocked.' });
+      amount = Math.round(post.ppvPrice * 100); // paise
+      description = `Unlock: ${post.title}`;
+      creatorId = post.creator._id;
+    } else if (type === 'subscription' && creatorSlug) {
+      const creator = await User.findOne({ slug: creatorSlug, role: 'creator' });
+      if (!creator) return res.status(404).json({ error: 'Creator not found.' });
+      if (fan._id.toString() === creator._id.toString()) return res.status(400).json({ error: 'Cannot subscribe to yourself.' });
+      amount = Math.round((creator.subscriptionMonthlyPrice || 299) * 100);
+      description = `Monthly Subscription — ${creator.displayName}`;
+      creatorId = creator._id;
+    } else {
+      return res.status(400).json({ error: 'Invalid payment request.' });
+    }
+
+    // Callback URL — Razorpay redirects here after payment
+    const callbackUrl = `${process.env.FRONTEND_URL}?razorpay_payment_link_id={id}&razorpay_payment_id={payment_id}&razorpay_payment_link_status={status}&razorpay_signature={signature}`;
+
+    const paymentLink = await razorpay.paymentLink.create({
+      amount,
+      currency: 'INR',
+      accept_partial: false,
+      description,
+      customer: {
+        name: fan.displayName || fan.email,
+        email: fan.email,
+      },
+      notify: { sms: false, email: false },
+      reminder_enable: false,
+      callback_url: callbackUrl,
+      callback_method: 'get',
+      notes: {
+        type,
+        fanId: fan._id.toString(),
+        creatorId: creatorId?.toString() || '',
+        postId: postId || '',
+        creatorSlug: creatorSlug || '',
+      },
+    });
+
+    res.json({ paymentLink: paymentLink.short_url });
+  } catch (err) {
+    console.error('Payment link create error:', err);
+    res.status(500).json({ error: 'Failed to create payment link. ' + (err.error?.description || err.message) });
+  }
+});
+
+// ── POST /api/payments/paymentlink/verify ────────────────
+// Verify payment after fan returns from Razorpay payment link
+router.post('/paymentlink/verify', protect, async (req, res) => {
+  try {
+    const { razorpay_payment_id, razorpay_payment_link_id, razorpay_payment_link_status, razorpay_signature } = req.body;
+    const fan = req.user;
+
+    if (razorpay_payment_link_status !== 'paid') {
+      return res.status(400).json({ error: 'Payment not completed.' });
+    }
+
+    // Verify signature
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_payment_link_id}|${razorpay_payment_id}`)
+      .digest('hex');
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ error: 'Payment verification failed.' });
+    }
+
+    // Fetch payment details and notes
+    const payment = await razorpay.payments.fetch(razorpay_payment_id);
+    const { type, fanId, creatorId, postId, creatorSlug } = payment.notes || {};
+
+    const amountInr = payment.amount / 100;
+    const creatorEarnings = amountInr * (1 - PLATFORM_FEE_PERCENT);
+
+    if (type === 'ppv' && postId) {
+      await User.findByIdAndUpdate(fan._id, { $addToSet: { unlockedPosts: postId } });
+      await Post.findByIdAndUpdate(postId, { $inc: { unlockCount: 1, revenue: creatorEarnings } });
+      await Transaction.create({
+        fan: fan._id, creator: creatorId, post: postId,
+        type: 'ppv', amountUsd: amountInr, currency: 'INR',
+        platformFeeUsd: amountInr * PLATFORM_FEE_PERCENT,
+        creatorEarningsUsd: creatorEarnings,
+        razorpayPaymentId: razorpay_payment_id,
+        razorpayOrderId: razorpay_payment_link_id,
+        status: 'succeeded',
+      });
+    } else if (type === 'subscription' && creatorId) {
+      const periodEnd = new Date();
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
+      await User.findByIdAndUpdate(fan._id, {
+        activeSubscription: {
+          subscriptionId: razorpay_payment_link_id,
+          creatorId,
+          status: 'active',
+          currentPeriodEnd: periodEnd,
+        }
+      });
+      await Transaction.create({
+        fan: fan._id, creator: creatorId,
+        type: 'subscription', amountUsd: amountInr, currency: 'INR',
+        platformFeeUsd: amountInr * PLATFORM_FEE_PERCENT,
+        creatorEarningsUsd: creatorEarnings,
+        razorpayPaymentId: razorpay_payment_id,
+        razorpayOrderId: razorpay_payment_link_id,
+        status: 'succeeded',
+      });
+    }
+
+    res.json({ success: true, message: 'Payment verified and content unlocked!' });
+  } catch (err) {
+    console.error('Payment link verify error:', err);
+    res.status(500).json({ error: 'Verification failed. ' + err.message });
+  }
+});
+
 // ── POST /api/payments/ppv/create ───────────────────────
 router.post('/ppv/create', protect, async (req, res) => {
   try {
@@ -276,6 +409,100 @@ router.post('/cancel-subscription', protect, async (req, res) => {
   } catch (err) {
     console.error('Cancel subscription error:', err);
     res.status(500).json({ error: 'Failed to cancel subscription.' });
+  }
+});
+
+
+// ── POST /api/payments/upi-pending ───────────────────────
+// Fan submits UTR after UPI payment — creator verifies manually
+router.post('/upi-pending', protect, async (req, res) => {
+  try {
+    const { utr, postId, creatorSlug, isSubscription, fanEmail, fanName } = req.body;
+    const fan = req.user;
+
+    // Find creator
+    let creatorId = null;
+    if (creatorSlug) {
+      const creator = await User.findOne({ slug: creatorSlug, role: 'creator' });
+      if (creator) creatorId = creator._id;
+    } else if (postId) {
+      const post = await Post.findById(postId).populate('creator');
+      if (post) creatorId = post.creator._id;
+    }
+
+    // Save as pending transaction
+    await Transaction.create({
+      fan: fan._id,
+      creator: creatorId,
+      post: postId || null,
+      type: isSubscription ? 'subscription' : 'ppv',
+      amountUsd: 0,
+      currency: 'INR',
+      platformFeeUsd: 0,
+      creatorEarningsUsd: 0,
+      razorpayPaymentId: `upi_${utr}`,
+      razorpayOrderId: `upi_pending_${Date.now()}`,
+      status: 'pending',
+      notes: `UPI UTR: ${utr} | Fan: ${fanEmail}`,
+    });
+
+    res.json({ success: true, message: 'Payment submitted for verification.' });
+  } catch (err) {
+    console.error('UPI pending error:', err);
+    res.status(500).json({ error: 'Failed to save payment.' });
+  }
+});
+
+
+// ── GET /api/payments/upi-pending-list ───────────────────
+// Creator sees all pending UPI payments
+router.get('/upi-pending-list', protect, async (req, res) => {
+  try {
+    if (req.user.role !== 'creator') return res.status(403).json({ error: 'Not authorized.' });
+    const transactions = await Transaction.find({ creator: req.user._id, status: 'pending' })
+      .sort({ createdAt: -1 })
+      .populate('fan', 'displayName email')
+      .populate('post', 'title')
+      .lean();
+    res.json({ transactions });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch pending payments.' });
+  }
+});
+
+// ── POST /api/payments/upi-approve ───────────────────────
+// Creator manually approves a pending UPI payment
+router.post('/upi-approve', protect, async (req, res) => {
+  try {
+    const { transactionId } = req.body;
+    if (req.user.role !== 'creator') return res.status(403).json({ error: 'Not authorized.' });
+
+    const txn = await Transaction.findById(transactionId).populate('fan').populate('post');
+    if (!txn) return res.status(404).json({ error: 'Transaction not found.' });
+
+    // Unlock content for fan
+    if (txn.type === 'ppv' && txn.post) {
+      await User.findByIdAndUpdate(txn.fan._id, { $addToSet: { unlockedPosts: txn.post._id } });
+    } else if (txn.type === 'subscription' && txn.creator) {
+      const periodEnd = new Date();
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
+      await User.findByIdAndUpdate(txn.fan._id, {
+        activeSubscription: {
+          subscriptionId: `upi_${transactionId}`,
+          creatorId: txn.creator,
+          status: 'active',
+          currentPeriodEnd: periodEnd,
+        }
+      });
+    }
+
+    txn.status = 'succeeded';
+    await txn.save();
+
+    res.json({ success: true, message: 'Payment approved and content unlocked.' });
+  } catch (err) {
+    console.error('UPI approve error:', err);
+    res.status(500).json({ error: 'Failed to approve payment.' });
   }
 });
 
