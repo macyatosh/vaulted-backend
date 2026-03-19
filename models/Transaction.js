@@ -12,6 +12,7 @@ const transactionSchema = new mongoose.Schema({
   razorpayPaymentId: { type: String },
   razorpayOrderId: { type: String },
   status: { type: String, enum: ['pending', 'succeeded', 'failed', 'refunded'], default: 'pending' },
+  notes: { type: String }, // for UPI UTR and manual notes
 }, { timestamps: true });
 
 module.exports = mongoose.model('Transaction', transactionSchema);
